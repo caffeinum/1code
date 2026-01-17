@@ -73,14 +73,21 @@ export const SubChatStatusCard = memo(function SubChatStatusCard({
 
     // Build set of all uncommitted file paths from git status
     const uncommittedPaths = new Set<string>()
-    for (const file of gitStatus.staged) {
-      uncommittedPaths.add(file.path)
+    // Safely iterate - arrays might be undefined in edge cases
+    if (gitStatus.staged) {
+      for (const file of gitStatus.staged) {
+        uncommittedPaths.add(file.path)
+      }
     }
-    for (const file of gitStatus.unstaged) {
-      uncommittedPaths.add(file.path)
+    if (gitStatus.unstaged) {
+      for (const file of gitStatus.unstaged) {
+        uncommittedPaths.add(file.path)
+      }
     }
-    for (const file of gitStatus.untracked) {
-      uncommittedPaths.add(file.path)
+    if (gitStatus.untracked) {
+      for (const file of gitStatus.untracked) {
+        uncommittedPaths.add(file.path)
+      }
     }
 
     // Filter changedFiles to only include files that are still uncommitted

@@ -536,7 +536,7 @@ export function SubChatSelector({
                           <div className="flex-shrink-0 w-3.5 h-3.5 flex items-center justify-center relative">
                             {isLoading ? (
                               // Loading: show only spinner (replaces entire icon block)
-                              <IconSpinner className="w-3.5 h-3.5 text-muted-foreground" />
+                              <IconSpinner className="w-3.5 h-3.5 text-muted-foreground" size="nano" />
                             ) : (
                               <>
                                 {/* Main mode icon */}

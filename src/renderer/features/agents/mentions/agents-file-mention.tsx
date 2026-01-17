@@ -22,7 +22,7 @@ import {
   FilesIcon,
   IconSpinner,
   SkillIcon,
-  AgentIcon,
+  CustomAgentIcon,
 } from "../../../components/ui/icons"
 import { ChevronRight } from "lucide-react"
 import {
@@ -313,7 +313,7 @@ export function createFileIconElement(filename: string, type?: "file" | "folder"
   const IconComponent = type === "skill"
     ? SkillIcon
     : type === "agent"
-      ? AgentIcon
+      ? CustomAgentIcon
     : type === "folder"
       ? FolderOpenIcon
       : (getFileIconByExtension(filename) ?? FilesIcon)
@@ -399,8 +399,8 @@ function SkillIconWrapper({ className }: { className?: string }) {
   return <SkillIcon className={className} />
 }
 
-function AgentIconWrapper({ className }: { className?: string }) {
-  return <AgentIcon className={className} />
+function CustomAgentIconWrapper({ className }: { className?: string }) {
+  return <CustomAgentIcon className={className} />
 }
 
 // Category icon component
@@ -412,7 +412,7 @@ function CategoryIcon({ className, categoryId }: { className?: string; categoryI
     return <SkillIcon className={className} />
   }
   if (categoryId === "agents") {
-    return <AgentIcon className={className} />
+    return <CustomAgentIcon className={className} />
   }
   return <FilesIcon className={className} />
 }
@@ -431,7 +431,7 @@ export function getOptionIcon(option: { id?: string; label: string; type?: "file
     return SkillIconWrapper
   }
   if (option.type === "agent") {
-    return AgentIconWrapper
+    return CustomAgentIconWrapper
   }
   if (option.type === "folder") {
     return FolderIcon
@@ -475,8 +475,22 @@ function renderFolderTree(path: string) {
 }
 
 /**
+ * Check if a string matches all search words (multi-word search)
+ * Splits search by whitespace, all words must be present in target
+ */
+function matchesMultiWordSearch(target: string, searchLower: string): boolean {
+  if (!searchLower) return true
+  const searchWords = searchLower.split(/\s+/).filter(Boolean)
+  if (searchWords.length === 0) return true
+  const targetLower = target.toLowerCase()
+  return searchWords.every(word => targetLower.includes(word))
+}
+
+/**
  * Sort files by relevance to search query
  * Priority: exact match > starts with > shorter match > contains in filename > alphabetical
+ * Supports multi-word search - splits by whitespace, all words must match
+ * When search ends with space, prioritize files with hyphen/underscore (e.g. "agents " -> "agents-sidebar")
  */
 function sortFilesByRelevance<T extends { label: string; path?: string }>(
   files: T[],
@@ -485,6 +499,10 @@ function sortFilesByRelevance<T extends { label: string; path?: string }>(
   if (!searchText) return files
 
   const searchLower = searchText.toLowerCase()
+  const searchWords = searchLower.split(/\s+/).filter(Boolean)
+  const isSingleWord = searchWords.length <= 1
+  // Check if search ends with space - user wants to continue with hyphenated names
+  const endsWithSpace = searchText.endsWith(" ")
 
   return [...files].sort((a, b) => {
     const aLabelLower = a.label.toLowerCase()
@@ -494,28 +512,54 @@ function sortFilesByRelevance<T extends { label: string; path?: string }>(
     const aNameNoExt = aLabelLower.replace(/\.[^.]+$/, "")
     const bNameNoExt = bLabelLower.replace(/\.[^.]+$/, "")
 
-    // Priority 1: EXACT match (chat.tsx when searching "chat")
-    const aExact = aNameNoExt === searchLower
-    const bExact = bNameNoExt === searchLower
-    if (aExact && !bExact) return -1
-    if (!aExact && bExact) return 1
+    // For multi-word search, prioritize files where all words match in filename
+    if (!isSingleWord) {
+      const aAllInFilename = searchWords.every(w => aLabelLower.includes(w))
+      const bAllInFilename = searchWords.every(w => bLabelLower.includes(w))
+      if (aAllInFilename && !bAllInFilename) return -1
+      if (!aAllInFilename && bAllInFilename) return 1
+    }
 
-    // Priority 2: filename STARTS with query
-    const aStartsWith = aNameNoExt.startsWith(searchLower)
-    const bStartsWith = bNameNoExt.startsWith(searchLower)
+    // When search ends with space, prioritize files with hyphen/underscore after first word
+    // e.g. "agents " should show "agents-sidebar" before "agents" folder
+    if (endsWithSpace && searchWords.length >= 1) {
+      const lastWord = searchWords[searchWords.length - 1]
+      // Check if filename has hyphen/underscore continuation after matching word
+      const aHasContinuation = aNameNoExt.includes(`${lastWord}-`) || aNameNoExt.includes(`${lastWord}_`)
+      const bHasContinuation = bNameNoExt.includes(`${lastWord}-`) || bNameNoExt.includes(`${lastWord}_`)
+      if (aHasContinuation && !bHasContinuation) return -1
+      if (!aHasContinuation && bHasContinuation) return 1
+    }
+
+    // Priority 1: EXACT match (chat.tsx when searching "chat") - single word only, not when ending with space
+    if (isSingleWord && !endsWithSpace) {
+      const aExact = aNameNoExt === searchLower
+      const bExact = bNameNoExt === searchLower
+      if (aExact && !bExact) return -1
+      if (!aExact && bExact) return 1
+    }
+
+    // Priority 2: filename STARTS with first search word
+    const firstWord = searchWords[0] || searchLower
+    const aStartsWith = aNameNoExt.startsWith(firstWord)
+    const bStartsWith = bNameNoExt.startsWith(firstWord)
     if (aStartsWith && !bStartsWith) return -1
     if (!aStartsWith && bStartsWith) return 1
 
     // Priority 3: If both start with query, shorter name = higher match %
+    // But when ending with space, prefer longer (hyphenated) names
     if (aStartsWith && bStartsWith) {
       if (aNameNoExt.length !== bNameNoExt.length) {
-        return aNameNoExt.length - bNameNoExt.length // shorter first
+        if (endsWithSpace) {
+          return bNameNoExt.length - aNameNoExt.length // longer first when space at end
+        }
+        return aNameNoExt.length - bNameNoExt.length // shorter first normally
       }
     }
 
-    // Priority 4: filename CONTAINS query (but doesn't start with it)
-    const aFilenameMatch = aLabelLower.includes(searchLower)
-    const bFilenameMatch = bLabelLower.includes(searchLower)
+    // Priority 4: filename CONTAINS first word (but doesn't start with it)
+    const aFilenameMatch = aLabelLower.includes(firstWord)
+    const bFilenameMatch = bLabelLower.includes(firstWord)
     if (aFilenameMatch && !bFilenameMatch) return -1
     if (!aFilenameMatch && bFilenameMatch) return 1
 
@@ -611,6 +655,14 @@ export const AgentsFileMention = memo(function AgentsFileMention({
     return () => clearTimeout(timer)
   }, [searchText])
 
+  // For multi-word search, send only first word to API (server filters by that),
+  // then filter results on client by all words
+  const apiSearchQuery = useMemo(() => {
+    if (!debouncedSearchText) return ""
+    const words = debouncedSearchText.split(/\s+/).filter(Boolean)
+    return words[0] || ""
+  }, [debouncedSearchText])
+
   // Fetch files from API
   // Priority: sandboxId (includes uncommitted) > branch (GitHub API) > cached file_tree
   const {
@@ -622,7 +674,7 @@ export const AgentsFileMention = memo(function AgentsFileMention({
     {
       teamId: teamId!,
       repository: repository!,
-      query: debouncedSearchText || "",
+      query: apiSearchQuery,
       limit: 50,
       sandboxId: sandboxId,
       branch: branch, // Pass branch for GitHub API fetch
@@ -644,9 +696,9 @@ export const AgentsFileMention = memo(function AgentsFileMention({
     const searchLower = debouncedSearchText.toLowerCase()
 
     const mapped = changedFiles
-      .filter(
-        (file) =>
-          !searchLower || file.filePath.toLowerCase().includes(searchLower),
+      .filter((file) =>
+        // Multi-word search: all words must match in file path
+        matchesMultiWordSearch(file.filePath, searchLower),
       )
       .map((file) => {
         const pathParts = file.filePath.split("/")
@@ -676,8 +728,12 @@ export const AgentsFileMention = memo(function AgentsFileMention({
   )
 
   const repoFileOptions: FileMentionOption[] = useMemo(() => {
+    const searchLower = debouncedSearchText.toLowerCase()
+
     const mapped = fileResults
       .filter((file) => !changedFilePaths.has(file.path))
+      // Client-side multi-word filtering (API only filtered by first word)
+      .filter((file) => matchesMultiWordSearch(file.path, searchLower))
       .map((file) => {
         // Get directory path (without filename/foldername) for inline display
         const pathParts = file.path.split("/")
@@ -703,9 +759,9 @@ export const AgentsFileMention = memo(function AgentsFileMention({
 
     return skills
       .filter(skill =>
-        !searchLower ||
-        skill.name.toLowerCase().includes(searchLower) ||
-        skill.description.toLowerCase().includes(searchLower)
+        // Multi-word search: all words must match in name OR description
+        matchesMultiWordSearch(skill.name, searchLower) ||
+        matchesMultiWordSearch(skill.description, searchLower)
       )
       .map(skill => ({
         id: `${MENTION_PREFIXES.SKILL}${skill.name}`,
@@ -726,9 +782,9 @@ export const AgentsFileMention = memo(function AgentsFileMention({
 
     return customAgents
       .filter(agent =>
-        !searchLower ||
-        agent.name.toLowerCase().includes(searchLower) ||
-        agent.description.toLowerCase().includes(searchLower)
+        // Multi-word search: all words must match in name OR description
+        matchesMultiWordSearch(agent.name, searchLower) ||
+        matchesMultiWordSearch(agent.description, searchLower)
       )
       .map(agent => ({
         id: `${MENTION_PREFIXES.AGENT}${agent.name}`,

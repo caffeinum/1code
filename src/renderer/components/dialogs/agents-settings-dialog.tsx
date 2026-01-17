@@ -10,7 +10,7 @@ import {
   EyeOpenFilledIcon,
   SlidersFilledIcon,
 } from "../../icons"
-import { SkillIcon, AgentIcon } from "../ui/icons"
+import { SkillIconFilled, CustomAgentIconFilled } from "../ui/icons"
 import { AgentsAppearanceTab } from "./settings-tabs/agents-appearance-tab"
 import { AgentsProfileTab } from "./settings-tabs/agents-profile-tab"
 import { AgentsPreferencesTab } from "./settings-tabs/agents-preferences-tab"
@@ -65,14 +65,14 @@ const ALL_TABS = [
   {
     id: "skills" as SettingsTab,
     label: "Skills",
-    icon: SkillIcon,
+    icon: SkillIconFilled,
     description: "Custom Claude skills",
     beta: true,
   },
   {
     id: "agents" as SettingsTab,
     label: "Custom Agents",
-    icon: AgentIcon,
+    icon: CustomAgentIconFilled,
     description: "Manage custom Claude agents",
     beta: true,
   },

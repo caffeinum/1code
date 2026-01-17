@@ -61,7 +61,14 @@ import {
   TerminalSquare,
 } from "lucide-react"
 import { motion } from "motion/react"
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react"
 import { createPortal } from "react-dom"
 import { toast } from "sonner"
 import { trackMessageSent } from "../../../lib/analytics"
@@ -93,10 +100,15 @@ import {
   pendingPrMessageAtom,
   pendingReviewMessageAtom,
   pendingUserQuestionsAtom,
+  pendingPlanApprovalsAtom,
   QUESTIONS_SKIPPED_MESSAGE,
+  scrollPositionsCacheStore,
   selectedAgentChatIdAtom,
   setLoading,
   subChatFilesAtom,
+  undoStackAtom,
+  type ScrollPositionData,
+  type UndoItem,
 } from "../atoms"
 import {
   AgentsSlashCommand,
@@ -227,6 +239,34 @@ function getFirstSubChatId(
       (b.created_at ? new Date(b.created_at).getTime() : 0),
   )
   return sorted[0]?.id ?? null
+}
+
+// Find the first NEW assistant message after the last known one
+// Used for smart scroll: when returning to a chat where streaming finished,
+// scroll to the start of the new response instead of bottom
+function findFirstNewAssistantMessage(
+  messages: Array<{ id: string; role: string }>,
+  lastKnownAssistantMsgId?: string,
+): string | undefined {
+  if (!lastKnownAssistantMsgId) {
+    // No previous assistant message - find first one
+    return messages.find((m) => m.role === "assistant")?.id
+  }
+
+  // Find index of last known message
+  const lastKnownIndex = messages.findIndex(
+    (m) => m.id === lastKnownAssistantMsgId,
+  )
+  if (lastKnownIndex === -1) return undefined
+
+  // Find first assistant message after that
+  for (let i = lastKnownIndex + 1; i < messages.length; i++) {
+    if (messages[i]?.role === "assistant") {
+      return messages[i]?.id
+    }
+  }
+
+  return undefined
 }
 
 // Layout constants for chat header and sticky messages
@@ -674,7 +714,7 @@ function CollapsibleSteps({
   if (stepsCount === 0) return null
 
   return (
-    <div className="mb-2">
+    <div className="mb-2" data-collapsible-steps="true">
       {/* Header row - styled like AgentToolCall with expand icon on right */}
       <div
         className="flex items-center justify-between rounded-md py-0.5 px-2 cursor-pointer hover:bg-muted/50 transition-colors"
@@ -732,6 +772,8 @@ function ChatViewInner({
   isSubChatsSidebarOpen = false,
   sandboxId,
   projectPath,
+  isArchived = false,
+  onRestoreWorkspace,
 }: {
   chat: Chat<any>
   subChatId: string
@@ -749,6 +791,8 @@ function ChatViewInner({
   isSubChatsSidebarOpen?: boolean
   sandboxId?: string
   projectPath?: string
+  isArchived?: boolean
+  onRestoreWorkspace?: () => void
 }) {
   // UNCONTROLLED: just track if editor has content for send button
   const [hasContent, setHasContent] = useState(false)
@@ -796,6 +840,8 @@ function ChatViewInner({
   }, [])
 
   // Scroll position persistence (like canvas)
+  // Atom is used for localStorage persistence, but we also need a module-level cache
+  // for synchronous access during tab switches (atom updates are async)
   const [scrollPositions, setScrollPositions] = useAtom(
     agentsScrollPositionsAtom,
   )
@@ -805,6 +851,12 @@ function ChatViewInner({
 
   // Track current scroll position in ref (for saving on cleanup - container ref may point to new container)
   const currentScrollTopRef = useRef(0)
+  // Track current scrollHeight for validation
+  const currentScrollHeightRef = useRef(0)
+  // Track current status for save cleanup (to know if we were streaming when leaving)
+  const currentStatusRef = useRef<string>("ready")
+  // Track last assistant message ID for smart scroll restoration
+  const lastAssistantMsgIdRef = useRef<string | undefined>(undefined)
 
   // Handle scroll events to detect user scrolling (throttled)
   // Updates shouldAutoScroll and tracks position in ref for cleanup
@@ -814,6 +866,7 @@ function ChatViewInner({
 
     // Always track current position (for cleanup to use)
     currentScrollTopRef.current = container.scrollTop
+    currentScrollHeightRef.current = container.scrollHeight
 
     // Throttle state updates to reduce re-renders
     const now = Date.now()
@@ -1052,14 +1105,27 @@ function ChatViewInner({
     }
   }, [])
 
-  // Save draft on unmount (when switching workspaces) - uses ref since editor may be gone
+  // Sync draft ref on every content change so unmount cleanup has fresh value
+  // (editorRef is null during unmount, so we need to keep ref in sync)
+  const handleContentChange = useCallback((hasContent: boolean) => {
+    setHasContent(hasContent)
+    // Sync the draft text ref for unmount save
+    const draft = editorRef.current?.getValue() || ""
+    currentDraftTextRef.current = draft
+  }, [])
+
+  // Save draft on unmount (when switching workspaces)
+  // Read directly from editor first (handles hotkey switch where blur didn't fire),
+  // fall back to ref if editor is already gone
   useEffect(() => {
     return () => {
-      const draft = currentDraftTextRef.current
+      const editorValue = editorRef.current?.getValue()
+      const refValue = currentDraftTextRef.current
+      const draft = editorValue || refValue
       const chatId = currentChatIdRef.current
       const subChatIdValue = currentSubChatIdRef.current
 
-      if (!chatId || !draft.trim()) return
+      if (!chatId || !draft?.trim()) return
 
       saveSubChatDraft(chatId, subChatIdValue, draft)
     }
@@ -1113,6 +1179,14 @@ function ChatViewInner({
   }, [status, subChatId, messages.length])
 
   const isStreaming = status === "streaming" || status === "submitted"
+
+  // Keep refs updated for scroll save cleanup to use
+  useEffect(() => {
+    currentStatusRef.current = status
+    // Find last assistant message ID
+    const lastAssistantMsg = [...messages].reverse().find((m) => m.role === "assistant")
+    lastAssistantMsgIdRef.current = lastAssistantMsg?.id
+  }, [status, messages])
 
   // Sync loading status to atom for UI indicators
   // When streaming starts, set loading. When it stops, clear loading.
@@ -1449,6 +1523,7 @@ function ChatViewInner({
     messages,
     subChatId,
     isStreaming,
+    parentChatId,
   )
 
   // ESC, Ctrl+C and Cmd+Shift+Backspace handler for stopping stream
@@ -1558,40 +1633,185 @@ function ChatViewInner({
     subChatId,
   ])
 
-  // Save and restore scroll position on tab switch
-  useEffect(() => {
+  // Ref to track if scroll has been restored for this sub-chat
+  const scrollRestoredRef = useRef(false)
+
+  // Save scroll position when LEAVING this tab (useLayoutEffect for synchronous save before unmount)
+  useLayoutEffect(() => {
+    const currentSubChatId = subChatId
+    const currentMessageCount = messages.length
+
+    return () => {
+      // Save position synchronously before unmount
+      const container = chatContainerRef.current
+      if (container) {
+        const wasStreaming =
+          currentStatusRef.current === "streaming" ||
+          currentStatusRef.current === "submitted"
+        const scrollData: ScrollPositionData = {
+          scrollTop: currentScrollTopRef.current,
+          scrollHeight: currentScrollHeightRef.current || container.scrollHeight,
+          messageCount: currentMessageCount,
+          wasStreaming,
+          lastAssistantMsgId: lastAssistantMsgIdRef.current,
+        }
+        // Save to SYNCHRONOUS cache first (for immediate reads on next tab switch)
+        scrollPositionsCacheStore.set(currentSubChatId, scrollData)
+        // Also save to atom for localStorage persistence
+        setScrollPositions((prev) => ({
+          ...prev,
+          [currentSubChatId]: scrollData,
+        }))
+      }
+    }
+  }, [subChatId, messages.length, setScrollPositions])
+
+  // Restore scroll position on mount with content-ready detection
+  useLayoutEffect(() => {
     const container = chatContainerRef.current
     if (!container) return
 
-    // Read current saved position (intentionally not in deps - we only restore on tab switch)
-    const savedPosition = scrollPositions[subChatId]
-    if (savedPosition !== undefined) {
-      container.scrollTop = savedPosition
-      currentScrollTopRef.current = savedPosition
-      justRestoredRef.current = true
-      const atBottom = isAtBottom()
-      setShouldAutoScroll(atBottom)
-      shouldAutoScrollRef.current = atBottom
-    } else {
-      // First time opening this sub-chat - scroll to bottom
-      requestAnimationFrame(() => {
-        container.scrollTop = container.scrollHeight
-        currentScrollTopRef.current = container.scrollHeight
+    // Reset tracking refs on sub-chat change
+    scrollRestoredRef.current = false
+
+    // Read saved position data - FIRST from synchronous cache, then fallback to atom
+    // The cache is updated synchronously in cleanup, while atom updates are async
+    const cachedData = scrollPositionsCacheStore.get(subChatId)
+    const atomData = scrollPositions[subChatId]
+    const savedData = cachedData ?? atomData
+
+    // Function to attempt scroll restoration
+    const restoreScroll = (source: string): boolean => {
+      if (scrollRestoredRef.current) return true
+
+      const currentContainer = chatContainerRef.current
+      if (!currentContainer) return false
+
+      if (savedData !== undefined) {
+        // Validate: only restore if we have similar content
+        // If message count matches and scrollHeight is sufficient, restore position
+        const canRestore =
+          currentContainer.scrollHeight >= savedData.scrollTop &&
+          (messages.length === savedData.messageCount ||
+            currentContainer.scrollHeight >= savedData.scrollHeight * 0.8) // Allow 20% variance
+
+        if (canRestore) {
+          currentContainer.scrollTop = savedData.scrollTop
+          currentScrollTopRef.current = savedData.scrollTop
+          currentScrollHeightRef.current = currentContainer.scrollHeight
+          scrollRestoredRef.current = true
+          justRestoredRef.current = true
+
+          // Calculate if user WAS at bottom when they LEFT (using saved data, not current DOM)
+          // This is critical because content may have grown while away
+          const clientHeight = currentContainer.clientHeight
+          const wasAtBottomWhenLeft =
+            savedData.scrollTop + clientHeight >= savedData.scrollHeight - 50 // 50px threshold
+
+          const atBottomNow = isAtBottom()
+          setShouldAutoScroll(atBottomNow)
+          shouldAutoScrollRef.current = atBottomNow
+
+          const contentGrew = currentContainer.scrollHeight > savedData.scrollHeight
+          const newMessagesAdded = messages.length > savedData.messageCount
+          const streamingFinished = savedData.wasStreaming && status !== "streaming" && status !== "submitted"
+
+          // SMART SCROLL: If was at bottom, streaming finished, and new content arrived
+          if (wasAtBottomWhenLeft && streamingFinished && (contentGrew || newMessagesAdded)) {
+            requestAnimationFrame(() => {
+              // Find the last assistant message element
+              const allAssistantEls = currentContainer.querySelectorAll("[data-assistant-message-id]")
+              const lastAssistantElement = allAssistantEls[allAssistantEls.length - 1]
+
+              // Check if it has a collapsed steps section OR a plan section
+              // These indicate there's substantial content worth scrolling to the start
+              const hasCollapsedSection = lastAssistantElement?.querySelector("[data-collapsible-steps]")
+              const hasPlanSection = lastAssistantElement?.querySelector("[data-plan-section]")
+
+              if (hasCollapsedSection || hasPlanSection) {
+                // Has collapsed section or plan - scroll to start of this response
+                const rect = lastAssistantElement.getBoundingClientRect()
+                const containerRect = currentContainer.getBoundingClientRect()
+                const scrollPos =
+                  currentContainer.scrollTop + (rect.top - containerRect.top) - 100 // 100px padding to clear user message shadow
+                currentContainer.scrollTop = Math.max(0, scrollPos)
+                currentScrollTopRef.current = currentContainer.scrollTop
+                shouldAutoScrollRef.current = false
+                setShouldAutoScroll(false)
+              } else {
+                // No collapsed section and no plan - just scroll to bottom
+                currentContainer.scrollTop = currentContainer.scrollHeight
+                currentScrollTopRef.current = currentContainer.scrollHeight
+                shouldAutoScrollRef.current = false
+                setShouldAutoScroll(false)
+              }
+            })
+            return true
+          }
+
+          // If still streaming and was at bottom, scroll to actual bottom (follow the stream)
+          if (wasAtBottomWhenLeft && contentGrew && (status === "streaming" || status === "submitted")) {
+            requestAnimationFrame(() => {
+              currentContainer.scrollTop = currentContainer.scrollHeight
+              currentScrollTopRef.current = currentContainer.scrollHeight
+              shouldAutoScrollRef.current = true
+              setShouldAutoScroll(true)
+            })
+          }
+          return true
+        }
+      } else if (currentContainer.scrollHeight > currentContainer.clientHeight) {
+        // First time opening this sub-chat with content - scroll to bottom
+        currentContainer.scrollTop = currentContainer.scrollHeight
+        currentScrollTopRef.current = currentContainer.scrollHeight
+        scrollRestoredRef.current = true
         setShouldAutoScroll(true)
         shouldAutoScrollRef.current = true
+        return true
+      } else if (messages.length === 0) {
+        // Empty chat - mark as restored (nothing to scroll)
+        scrollRestoredRef.current = true
+        setShouldAutoScroll(true)
+        shouldAutoScrollRef.current = true
+        return true
+      }
+
+      return false
+    }
+
+    // Try immediate restoration
+    if (restoreScroll("immediate")) return
+
+    // If not restored, use ResizeObserver to wait for content to render
+    let attempts = 0
+    const maxAttempts = 15 // More attempts for slow renders
+
+    const resizeObserver = new ResizeObserver(() => {
+      attempts++
+      if (restoreScroll(`ResizeObserver(${attempts})`) || attempts >= maxAttempts) {
+        resizeObserver.disconnect()
+      }
+    })
+
+    resizeObserver.observe(container)
+
+    // Also try with rAF chain as fallback
+    const tryWithRAF = (count: number) => {
+      if (scrollRestoredRef.current || count >= 5) return
+
+      requestAnimationFrame(() => {
+        if (restoreScroll(`rAF(${count})`)) return
+        tryWithRAF(count + 1)
       })
     }
 
-    // Save position when LEAVING this tab (use ref because container may already point to new tab)
-    const currentSubChatId = subChatId
+    requestAnimationFrame(() => tryWithRAF(0))
+
     return () => {
-      setScrollPositions((prev) => ({
-        ...prev,
-        [currentSubChatId]: currentScrollTopRef.current,
-      }))
+      resizeObserver.disconnect()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [subChatId])
+  }, [subChatId]) // Only trigger on sub-chat change, not on messages change
 
   // Attach scroll listener (separate effect)
   useEffect(() => {
@@ -1617,13 +1837,17 @@ function ChatViewInner({
 
     if (isTabSwitch) return
 
-    // Skip if we just restored (state update is async, ref is sync)
+    // Skip if we just restored scroll position (prevents interference with restoration)
     if (justRestoredRef.current) {
       justRestoredRef.current = false
       return
     }
 
-    if (shouldAutoScrollRef.current) {
+    // Skip if scroll restoration is still in progress (ResizeObserver may still be working)
+    if (!scrollRestoredRef.current) return
+
+    // Only auto-scroll during active streaming when user is at bottom
+    if (shouldAutoScrollRef.current && status === "streaming") {
       const container = chatContainerRef.current
       if (container) {
         requestAnimationFrame(() => {
@@ -1648,6 +1872,11 @@ function ChatViewInner({
     // Block sending while sandbox is still being set up
     if (sandboxSetupStatus !== "ready") {
       return
+    }
+
+    // Auto-restore archived workspace when sending a message
+    if (isArchived && onRestoreWorkspace) {
+      onRestoreWorkspace()
     }
 
     // Get value from uncontrolled editor
@@ -1940,6 +2169,38 @@ function ChatViewInner({
     return false
   }, [messages])
 
+  // Update pending plan approvals atom for sidebar indicators
+  const setPendingPlanApprovals = useSetAtom(pendingPlanApprovalsAtom)
+  useEffect(() => {
+    setPendingPlanApprovals((prev: Set<string>) => {
+      const newSet = new Set(prev)
+      if (hasUnapprovedPlan) {
+        newSet.add(subChatId)
+      } else {
+        newSet.delete(subChatId)
+      }
+      // Only return new set if it changed
+      if (newSet.size !== prev.size || ![...newSet].every((id) => prev.has(id))) {
+        return newSet
+      }
+      return prev
+    })
+  }, [hasUnapprovedPlan, subChatId, setPendingPlanApprovals])
+
+  // Clean up pending plan approval when unmounting
+  useEffect(() => {
+    return () => {
+      setPendingPlanApprovals((prev: Set<string>) => {
+        if (prev.has(subChatId)) {
+          const newSet = new Set(prev)
+          newSet.delete(subChatId)
+          return newSet
+        }
+        return prev
+      })
+    }
+  }, [subChatId, setPendingPlanApprovals])
+
   // Group messages into pairs: [userMsg, ...assistantMsgs]
   // Each group is a "conversation turn" where user message is sticky within the group
   const messageGroups = useMemo(() => {
@@ -2200,12 +2461,27 @@ function ChatViewInner({
                     // For non-last messages, show final text even while streaming (they're already complete)
                     const hasFinalText =
                       finalTextIndex !== -1 && (!isStreaming || !isLastMessage)
+
+                    // Check if message has a plan (ExitPlanMode tool)
+                    const exitPlanPart = allParts.find(
+                      (p: any) => p.type === "tool-ExitPlanMode",
+                    )
+                    const planText = typeof exitPlanPart?.output?.plan === "string"
+                      ? exitPlanPart.output.plan
+                      : ""
+                    const hasPlan = !!planText
+
+                    // If has plan, treat everything before plan as steps to collapse
                     const stepParts = hasFinalText
                       ? (assistantMsg.parts || []).slice(0, finalTextIndex)
-                      : []
+                      : hasPlan
+                        ? allParts.filter((p: any) => p.type !== "tool-ExitPlanMode") // All parts except plan are steps
+                        : []
                     const finalParts = hasFinalText
                       ? (assistantMsg.parts || []).slice(finalTextIndex)
-                      : assistantMsg.parts || []
+                      : hasPlan
+                        ? [] // Plan is rendered separately, no final parts
+                        : assistantMsg.parts || []
 
                     // Count visible step items (for the toggle label)
                     const visibleStepsCount = stepParts.filter((p: any) => {
@@ -2495,14 +2771,15 @@ function ChatViewInner({
                     return (
                       <motion.div
                         key={assistantMsg.id}
+                        data-assistant-message-id={assistantMsg.id}
                         className="group/message w-full mb-4"
                         initial={{ opacity: 0 }}
                         animate={{ opacity: 1 }}
                         transition={{ duration: 0.1, ease: "easeOut" }}
                       >
                         <div className="flex flex-col gap-1.5">
-                          {/* Collapsible steps section - only show when we have a final text */}
-                          {hasFinalText && visibleStepsCount > 0 && (
+                          {/* Collapsible steps section - show when we have final text OR a plan */}
+                          {(hasFinalText || hasPlan) && visibleStepsCount > 0 && (
                             <CollapsibleSteps stepsCount={visibleStepsCount}>
                               {(() => {
                                 const grouped = groupExploringTools(
@@ -2560,20 +2837,12 @@ function ChatViewInner({
                           })()}
 
                           {/* Plan card at end of message - if ExitPlanMode tool has plan content */}
-                          {(() => {
-                            const exitPlanPart = allParts.find(
-                              (p: any) => p.type === "tool-ExitPlanMode",
-                            )
-                            if (exitPlanPart) {
-                              return (
-                                <AgentExitPlanModeTool
-                                  part={exitPlanPart}
-                                  chatStatus={status}
-                                />
-                              )
-                            }
-                            return null
-                          })()}
+                          {hasPlan && exitPlanPart && (
+                            <AgentExitPlanModeTool
+                              part={exitPlanPart}
+                              chatStatus={status}
+                            />
+                          )}
 
                           {/* Planning indicator - like Canvas */}
                           {shouldShowPlanning && (
@@ -2589,19 +2858,28 @@ function ChatViewInner({
                         </div>
 
                         {/* Copy, Play, and Usage buttons bar - shows on hover (always visible on mobile) */}
-                        {hasTextContent && (!isStreaming || !isLastMessage) && (
+                        {(hasTextContent || hasPlan) && (!isStreaming || !isLastMessage) && (
                           <div className="flex justify-between items-center h-6 px-2 mt-1">
                             <div className="flex items-center gap-0.5">
                               <CopyButton
-                                onCopy={() => copyMessageContent(assistantMsg)}
+                                onCopy={() => {
+                                  // If has plan, copy plan text; otherwise copy message content
+                                  if (hasPlan) {
+                                    navigator.clipboard.writeText(planText)
+                                  } else {
+                                    copyMessageContent(assistantMsg)
+                                  }
+                                }}
                                 isMobile={isMobile}
                               />
-                              {/* Play button for all assistant messages - plays only final text (Summary) */}
+                              {/* Play button - plays plan if exists, otherwise final text or full message */}
                               <PlayButton
                                 text={
-                                  hasFinalText
-                                    ? allParts[finalTextIndex]?.text || ""
-                                    : getMessageTextContent(assistantMsg)
+                                  hasPlan
+                                    ? planText
+                                    : hasFinalText
+                                      ? allParts[finalTextIndex]?.text || ""
+                                      : getMessageTextContent(assistantMsg)
                                 }
                                 isMobile={isMobile}
                                 playbackRate={ttsPlaybackRate}
@@ -2775,7 +3053,7 @@ function ChatViewInner({
                     }}
                     onSlashTrigger={handleSlashTrigger}
                     onCloseSlashTrigger={handleCloseSlashTrigger}
-                    onContentChange={setHasContent}
+                    onContentChange={handleContentChange}
                     onSubmit={handleSend}
                     onShiftTab={() => setIsPlanMode((prev) => !prev)}
                     placeholder="Plan, @ for context, / for commands"
@@ -3162,6 +3440,7 @@ export function ChatView({
   const setSubChatUnseenChanges = useSetAtom(agentsSubChatUnseenChangesAtom)
   const setJustCreatedIds = useSetAtom(justCreatedIdsAtom)
   const selectedChatId = useAtomValue(selectedAgentChatIdAtom)
+  const setUndoStack = useSetAtom(undoStackAtom)
   const { notifyAgentComplete } = useDesktopNotifications()
 
   // Check if any chat has unseen changes
@@ -3347,10 +3626,9 @@ export function ChatView({
     mergePrMutation.mutate({ chatId, method: "squash" })
   }, [chatId, mergePrMutation])
 
-  // Restore archived workspace mutation
+  // Restore archived workspace mutation (silent - no toast)
   const restoreWorkspaceMutation = trpc.chats.restore.useMutation({
     onSuccess: (restoredChat) => {
-      toast.success("Workspace restored!", { position: "top-center" })
       if (restoredChat) {
         // Update the main chat list cache
         trpcUtils.chats.list.setData({}, (oldData) => {
@@ -3364,9 +3642,6 @@ export function ChatView({
       trpcUtils.chats.listArchived.invalidate()
       // Invalidate this chat's data to update isArchived state
       utils.agents.getAgentChat.invalidate({ chatId })
-    },
-    onError: (error) => {
-      toast.error(error.message || "Failed to restore workspace", { position: "top-center" })
     },
   })
 
@@ -4051,6 +4326,22 @@ export function ChatView({
   const isSubChatMultiSelectMode = useAtomValue(isSubChatMultiSelectModeAtom)
   const clearSubChatSelection = useSetAtom(clearSubChatSelectionAtom)
 
+  // Helper to add sub-chat to undo stack
+  const addSubChatToUndoStack = useCallback((subChatId: string) => {
+    const timeoutId = setTimeout(() => {
+      setUndoStack((prev) => prev.filter(
+        (item) => !(item.type === "subchat" && item.subChatId === subChatId)
+      ))
+    }, 10000)
+
+    setUndoStack((prev) => [...prev, {
+      type: "subchat",
+      subChatId,
+      chatId,
+      timeoutId,
+    }])
+  }, [chatId, setUndoStack])
+
   // Keyboard shortcut: Close active sub-chat (or bulk close if multi-select mode)
   // Web: Opt+Cmd+W (browser uses Cmd+W to close tab)
   // Desktop: Cmd+W
@@ -4083,7 +4374,10 @@ export function ChatView({
 
           // Don't close all tabs via hotkey - user should use sidebar dialog for last tab
           if (remainingOpenIds.length > 0) {
-            idsToClose.forEach((id) => store.removeFromOpenSubChats(id))
+            idsToClose.forEach((id) => {
+              store.removeFromOpenSubChats(id)
+              addSubChatToUndoStack(id)
+            })
           }
           clearSubChatSelection()
           return
@@ -4097,13 +4391,14 @@ export function ChatView({
         // removeFromOpenSubChats automatically switches to the last remaining tab
         if (activeId && openIds.length > 1) {
           store.removeFromOpenSubChats(activeId)
+          addSubChatToUndoStack(activeId)
         }
       }
     }
 
     window.addEventListener("keydown", handleKeyDown)
     return () => window.removeEventListener("keydown", handleKeyDown)
-  }, [isSubChatMultiSelectMode, selectedSubChatIds, clearSubChatSelection])
+  }, [isSubChatMultiSelectMode, selectedSubChatIds, clearSubChatSelection, addSubChatToUndoStack])
 
   // Keyboard shortcut: Navigate between sub-chats
   // Web: Opt+Cmd+[ and Opt+Cmd+] (browser uses Cmd+[ for back)
@@ -4572,6 +4867,8 @@ export function ChatView({
               isSubChatsSidebarOpen={subChatsSidebarMode === "sidebar"}
               sandboxId={sandboxId || undefined}
               projectPath={worktreePath || undefined}
+              isArchived={isArchived}
+              onRestoreWorkspace={handleRestoreWorkspace}
             />
           ) : (
             <>

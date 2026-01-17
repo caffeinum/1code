@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useSetAtom } from "jotai"
-import { subChatFilesAtom, type SubChatFileChange } from "../atoms"
+import { subChatFilesAtom, subChatToChatMapAtom, type SubChatFileChange } from "../atoms"
 // import { REPO_ROOT_PATH } from "@/lib/codesandbox-constants"
 const REPO_ROOT_PATH = "/workspace" // Desktop mock
 
@@ -28,8 +28,10 @@ export function useChangedFilesTracking(
   messages: Message[],
   subChatId: string,
   isStreaming: boolean = false,
+  chatId?: string,
 ) {
   const setSubChatFiles = useSetAtom(subChatFilesAtom)
+  const setSubChatToChatMap = useSetAtom(subChatToChatMapAtom)
 
   // Helper to get display path (removes sandbox prefixes)
   const getDisplayPath = useCallback((filePath: string): string => {
@@ -189,6 +191,17 @@ export function useChangedFilesTracking(
       return next
     })
   }, [subChatId, changedFiles, setSubChatFiles])
+
+  // Update subChatId -> chatId mapping for aggregation in workspace sidebar
+  useEffect(() => {
+    if (chatId) {
+      setSubChatToChatMap((prev) => {
+        const next = new Map(prev)
+        next.set(subChatId, chatId)
+        return next
+      })
+    }
+  }, [subChatId, chatId, setSubChatToChatMap])
 
   return { changedFiles }
 }

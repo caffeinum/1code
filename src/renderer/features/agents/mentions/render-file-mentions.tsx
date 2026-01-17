@@ -2,7 +2,7 @@
 
 import { useMemo } from "react"
 import { getFileIconByExtension } from "./agents-file-mention"
-import { FilesIcon, SkillIcon, AgentIcon } from "../../../components/ui/icons"
+import { FilesIcon, SkillIcon, CustomAgentIcon } from "../../../components/ui/icons"
 import { MENTION_PREFIXES } from "./agents-mentions-editor"
 
 // Custom folder icon matching design
@@ -92,7 +92,7 @@ function MentionChip({ mention }: { mention: ParsedMention }) {
   const Icon = mention.type === "skill"
     ? SkillIcon
     : mention.type === "agent"
-      ? AgentIcon
+      ? CustomAgentIcon
       : mention.type === "folder"
         ? FolderOpenIcon
         : (getFileIconByExtension(mention.label) ?? FilesIcon)

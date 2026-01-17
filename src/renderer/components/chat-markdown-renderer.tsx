@@ -212,7 +212,7 @@ const sizeStyles: Record<
       "bg-foreground/[0.06] dark:bg-foreground/[0.1] font-mono text-[85%] rounded px-[0.4em] py-[0.2em] break-all",
     blockquote:
       "border-l-2 border-foreground/20 pl-3 text-foreground/70 mb-px text-sm",
-    hr: "mt-6 mb-4 border-t border-border",
+    hr: "mt-8 mb-4 border-t border-border",
     table: "w-full text-sm",
     thead: "border-b border-border",
     tbody: "",
@@ -236,7 +236,7 @@ const sizeStyles: Record<
       "bg-foreground/[0.06] dark:bg-foreground/[0.1] font-mono text-[85%] rounded px-[0.4em] py-[0.2em] break-all",
     blockquote:
       "border-l-2 border-foreground/20 pl-4 text-foreground/70 mb-px",
-    hr: "mt-6 mb-4 border-t border-border",
+    hr: "mt-8 mb-4 border-t border-border",
     table: "w-full text-sm",
     thead: "border-b border-border",
     tbody: "",
@@ -260,7 +260,7 @@ const sizeStyles: Record<
       "bg-foreground/[0.06] dark:bg-foreground/[0.1] font-mono text-[85%] rounded px-[0.4em] py-[0.2em] break-all",
     blockquote:
       "border-l-2 border-foreground/20 pl-4 text-foreground/70 mb-px",
-    hr: "mt-6 mb-4 border-t border-border",
+    hr: "mt-8 mb-4 border-t border-border",
     table: "w-full text-sm",
     thead: "border-b border-border",
     tbody: "",

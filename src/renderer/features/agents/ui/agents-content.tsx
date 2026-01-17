@@ -11,6 +11,7 @@ const useUser = () => ({ user: null })
 const useClerk = () => ({ signOut: () => {} })
 import {
   selectedAgentChatIdAtom,
+  previousAgentChatIdAtom,
   agentsMobileViewModeAtom,
   agentsPreviewSidebarOpenAtom,
   agentsSidebarOpenAtom,
@@ -23,9 +24,6 @@ import {
   agentsQuickSwitchSelectedIndexAtom,
   subChatsQuickSwitchOpenAtom,
   subChatsQuickSwitchSelectedIndexAtom,
-  selectedAgentChatIdsAtom,
-  isAgentMultiSelectModeAtom,
-  clearAgentChatSelectionAtom,
   ctrlTabTargetAtom,
 } from "../../../lib/atoms"
 import { NewChatForm } from "../main/new-chat-form"
@@ -52,7 +50,6 @@ import { Button } from "../../../components/ui/button"
 import { AlignJustify } from "lucide-react"
 import { AgentsQuickSwitchDialog } from "../components/agents-quick-switch-dialog"
 import { SubChatsQuickSwitchDialog } from "../components/subchats-quick-switch-dialog"
-import { useArchiveChat } from "../../sidebar/hooks/use-archive-chat"
 import { isDesktopApp } from "../../../lib/utils/platform"
 // Desktop mock
 const useIsAdmin = () => false
@@ -157,26 +154,20 @@ export function AgentsContent() {
     { enabled: !!selectedChatId },
   )
 
-  // Archive chat mutation with proper navigation logic
-  const archiveChatMutation = useArchiveChat({
-    teamId: selectedTeamId,
-    selectedChatId,
-  })
+  // Track previous chat ID for navigation after archive
+  const [previousChatId, setPreviousChatId] = useAtom(previousAgentChatIdAtom)
+  const prevSelectedChatIdRef = useRef<string | null>(null)
 
-  // Multi-select state for bulk archive
-  const selectedChatIds = useAtomValue(selectedAgentChatIdsAtom)
-  const isMultiSelectMode = useAtomValue(isAgentMultiSelectModeAtom)
-  const clearChatSelection = useSetAtom(clearAgentChatSelectionAtom)
-  const utils = api.useUtils()
+  // Update previousChatId when selectedChatId changes
+  useEffect(() => {
+    // Only update if we're switching from one chat to another
+    if (prevSelectedChatIdRef.current && prevSelectedChatIdRef.current !== selectedChatId) {
+      setPreviousChatId(prevSelectedChatIdRef.current)
+    }
+    prevSelectedChatIdRef.current = selectedChatId
+  }, [selectedChatId, setPreviousChatId])
 
-  // Batch archive mutation for multi-select
-  const archiveChatsBatchMutation = api.agents.archiveChatsBatch.useMutation({
-    onSuccess: () => {
-      utils.agents.getAgentChats.invalidate({ teamId: selectedTeamId! })
-      utils.agents.getArchivedChats.invalidate({ teamId: selectedTeamId! })
-      clearChatSelection()
-    },
-  })
+  // Note: Archive mutations moved to AgentsSidebar to share undo stack with Cmd+Z
 
   // Track hydration
   useEffect(() => {
@@ -697,53 +688,7 @@ export function AgentsContent() {
     }
   }, [setSubChatQuickSwitchOpen, setSubChatQuickSwitchSelectedIndex, ctrlTabTarget])
 
-  // Keyboard shortcut: Archive current chat (or bulk archive if multi-select mode)
-  // Web: Opt+Cmd+E (browser uses Cmd+E for search bar focus)
-  // Desktop: Cmd+E
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      const isDesktop = isDesktopApp()
-
-      // Desktop: Cmd+E (without Alt)
-      const isDesktopShortcut =
-        isDesktop &&
-        e.metaKey &&
-        e.code === "KeyE" &&
-        !e.altKey &&
-        !e.shiftKey &&
-        !e.ctrlKey
-      // Web: Opt+Cmd+E (with Alt)
-      const isWebShortcut = e.altKey && e.metaKey && e.code === "KeyE"
-
-      if (isDesktopShortcut || isWebShortcut) {
-        e.preventDefault()
-
-        // If multi-select mode, bulk archive selected chats
-        if (isMultiSelectMode && selectedChatIds.size > 0) {
-          if (!archiveChatsBatchMutation.isPending) {
-            archiveChatsBatchMutation.mutate({
-              chatIds: Array.from(selectedChatIds),
-            })
-          }
-          return
-        }
-
-        // Otherwise archive current chat
-        if (selectedChatId && !archiveChatMutation.isPending) {
-          archiveChatMutation.mutate({ chatId: selectedChatId })
-        }
-      }
-    }
-
-    window.addEventListener("keydown", handleKeyDown)
-    return () => window.removeEventListener("keydown", handleKeyDown)
-  }, [
-    selectedChatId,
-    archiveChatMutation,
-    isMultiSelectMode,
-    selectedChatIds,
-    archiveChatsBatchMutation,
-  ])
+  // Note: Cmd+E archive hotkey is handled in AgentsSidebar to share undo stack
 
   const handleSignOut = async () => {
     // Check if running in Electron desktop app
